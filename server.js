@@ -9,9 +9,42 @@ if (!globalThis.crypto) {
 }
 
 // ==================== KONFIGURASI ====================
-const vmessUUID = atob('ZjI4MmI4NzgtODcxMS00NWExLThjNjktNTU2NDE3MjEyM2Mx');
+const vmessUUID = atob('ZjI4MmI4NzgtODcxMS00NWExLThjNjktNTU2NDE3MjEyM2Mx'); // "f282b878-8711-45a1-8c69-5564172123c1"
 const PORT = process.env.PORT || 3000;
 const START_TIME = Date.now();
+
+// ==================== REGION & MANUAL PROXY DATA (DARI WORKER) ====================
+const REGIONS = {
+    "ASIA": ["ID", "SG", "MY", "PH", "TH", "VN", "JP", "KR", "CN", "HK", "TW", "IN"],
+    "ASIA2": ["ID", "SG", "MY", "PH", "TH", "VN"],
+    "ASIA3": ["JP", "KR", "CN", "HK", "TW"],
+    "ASEAN": ["ID", "SG", "MY", "PH", "TH", "VN"],
+    "SEA": ["ID", "SG", "MY", "PH", "TH", "VN"],
+    "EASTASIA": ["JP", "KR", "CN", "HK", "TW"],
+    "SOUTHASIA": ["IN", "BD", "PK", "LK", "NP"],
+    "EUROPE": ["GB", "FR", "DE", "NL", "IT", "ES", "RU", "UA", "PL", "SE", "NO", "DK", "FI", "CH", "BE", "AT", "CZ", "GR", "PT", "IE", "HU", "RO"],
+    "EU": ["GB", "FR", "DE", "NL", "IT", "ES"],
+    "EUW": ["GB", "FR", "DE", "NL"],
+    "EUE": ["PL", "CZ", "HU", "RO"],
+    "AMERICA": ["US", "CA", "MX", "BR", "AR", "CL", "CO", "PE", "VE"],
+    "USA": ["US"], "US": ["US"],
+    "NORTHAMERICA": ["US", "CA", "MX"],
+    "SOUTHAMERICA": ["BR", "AR", "CL", "CO", "PE", "VE"],
+    "LATAM": ["MX", "BR", "AR", "CL", "CO", "PE", "VE"],
+    "AFRICA": ["ZA", "NG", "EG", "MA", "KE", "DZ", "TN"],
+    "OCEANIA": ["AU", "NZ"], "AUSTRALIA": ["AU"],
+    "MIDDLEEAST": ["AE", "SA", "IL", "TR", "IR"],
+    "GLOBAL": []
+};
+
+// Daftar proxy manual sebagai fallback jika proxy list utama kosong
+const MANUAL_PROXY = {
+    "SG": ["178.128.80.43:443", "91.192.81.154:2053", "51.79.158.58:8443", "34.143.159.175:443"],
+    "ID": ["103.6.207.108:8080"],
+    "JP": ["18.179.45.123:443", "52.194.12.34:8443"],
+    "US": ["167.172.234.12:443", "159.203.182.32:2053"],
+    "AE": ["176.97.66.175:443", "152.32.181.246:44070", "193.123.90.82:12648", "139.185.50.5:14594"]
+};
 
 // ==================== UTILITY FUNCTIONS ====================
 const str2arr = (str) => new TextEncoder().encode(str);
@@ -46,10 +79,10 @@ const WS_READY_STATE_CLOSING = 2;
 const DNS_PORT = 53;
 
 const PROTOCOLS = {
-    P1: atob('VHJvamFu'),
-    P2: atob('VkxFU1M='),
-    P3: atob('U2hhZG93c29ja3M='),
-    P4: atob('Vk1lc3M='),
+    P1: atob('VHJvamFu'),       // "Trojan"
+    P2: atob('VkxFU1M='),       // "VLESS"
+    P3: atob('U2hhZG93c29ja3M='), // "Shadowsocks"
+    P4: atob('Vk1lc3M='),       // "VMess"
     OBFS_PATH: atob('L0ZyZWUtVlBOLUNGLUdlby1Qcm9qZWN0Lw=='),
     VMS_PRE: atob('dm1lc3M6Ly8='),
     VLS_PRE: atob('dmxlc3M6Ly8='),
@@ -68,17 +101,122 @@ const DETECTION_PATTERNS = {
     DELIMITER_OFFSET: 56
 };
 
-const ADDRESS_TYPES = {
-    IPV4: 1,
-    DOMAIN: 2,
-    IPV6: 3,
-    DOMAIN_ALT: 3
-};
-const COMMAND_TYPES = {
-    TCP: 1,
-    UDP: 2,
-    UDP_ALT: 3
-};
+const ADDRESS_TYPES = { IPV4: 1, DOMAIN: 2, IPV6: 3, DOMAIN_ALT: 3 };
+const COMMAND_TYPES = { TCP: 1, UDP: 2, UDP_ALT: 3 };
+
+// ==================== CACHE PROXY LIST ====================
+let cachedProxyList = null;
+let cacheTime = 0;
+const CACHE_TTL = 300000; // 5 menit
+
+async function fetchProxyList() {
+    const now = Date.now();
+    if (cachedProxyList && (now - cacheTime) < CACHE_TTL) return cachedProxyList;
+    try {
+        const response = await fetch(PROTOCOLS.PL_URL);
+        const text = await response.text();
+        const lines = text.split('\n');
+        const proxyMap = new Map();
+        for (const line of lines) {
+            if (line.trim() && !line.startsWith('#')) {
+                const parts = line.split(',');
+                if (parts.length >= 3) {
+                    const ip = parts[0].trim();
+                    const port = parts[1].trim();
+                    const country = parts[2].trim().toUpperCase();
+                    const proxyString = ip + ':' + port;
+                    if (!proxyMap.has(country)) proxyMap.set(country, []);
+                    proxyMap.get(country).push(proxyString);
+                }
+            }
+        }
+        // Merge manual proxy
+        for (const [country, proxies] of Object.entries(MANUAL_PROXY)) {
+            if (!proxyMap.has(country)) proxyMap.set(country, []);
+            for (const proxy of proxies) {
+                if (!proxyMap.get(country).includes(proxy)) proxyMap.get(country).push(proxy);
+            }
+        }
+        cachedProxyList = proxyMap;
+        cacheTime = now;
+        return proxyMap;
+    } catch (error) {
+        console.error('Failed to fetch proxy list:', error);
+        return cachedProxyList || new Map();
+    }
+}
+
+// ==================== ROUTING BY PATH ====================
+async function getProxyFromPath(pathname) {
+    if (!pathname || pathname === '/') return null;
+    const parts = pathname.substring(1).split('/');
+    const command = parts[0].toUpperCase();
+    const proxyMap = await fetchProxyList();
+
+    // 1. Cek kode negara langsung (contoh: /ID, /SG)
+    if (proxyMap.has(command)) {
+        const proxies = proxyMap.get(command);
+        if (proxies && proxies.length > 0) {
+            return proxies[Math.floor(Math.random() * proxies.length)];
+        }
+    }
+
+    // 2. Cek dengan indeks (contoh: /ID2, /SG3)
+    const matchIndex = command.match(/^([A-Z]{2})(\d+)$/);
+    if (matchIndex && proxyMap.has(matchIndex[1])) {
+        const country = matchIndex[1];
+        const index = parseInt(matchIndex[2]) - 1;
+        const proxies = proxyMap.get(country);
+        if (proxies && proxies[index]) return proxies[index];
+    }
+
+    // 3. /ALL -> semua proxy
+    if (command === "ALL") {
+        const allProxies = [];
+        for (const proxies of proxyMap.values()) allProxies.push(...proxies);
+        if (allProxies.length > 0) return allProxies[Math.floor(Math.random() * allProxies.length)];
+    }
+
+    // 4. /REGION (contoh: /ASIA, /EUROPE, /AMERICA)
+    if (REGIONS[command]) {
+        const regionProxies = [];
+        for (const country of REGIONS[command]) {
+            if (proxyMap.has(country)) regionProxies.push(...proxyMap.get(country));
+        }
+        if (regionProxies.length > 0) return regionProxies[Math.floor(Math.random() * regionProxies.length)];
+    }
+
+    // 5. /PROXYLIST/ID,SG,JP -> pilih random dari daftar negara
+    const proxyListMatch = pathname.match(/^\/PROXYLIST\/([A-Z]{2}(,[A-Z]{2})*)$/i);
+    if (proxyListMatch) {
+        const countryCodes = proxyListMatch[1].toUpperCase().split(",");
+        const availableProxies = [];
+        for (const code of countryCodes) {
+            if (proxyMap.has(code)) availableProxies.push(...proxyMap.get(code));
+        }
+        if (availableProxies.length > 0) return availableProxies[Math.floor(Math.random() * availableProxies.length)];
+    }
+
+    // 6. /PUTAR atau /PUTARn -> rotasi random dari semua negara
+    const putarMatch = pathname.match(/^\/PUTAR(\d+)?$/i);
+    if (putarMatch) {
+        const countryCount = putarMatch[1] ? parseInt(putarMatch[1], 10) : null;
+        const countries = Array.from(proxyMap.keys()).filter(c => proxyMap.get(c).length > 0);
+        if (countries.length === 0) return null;
+        const selectedCountries = countryCount
+            ? countries.sort(() => Math.random() - 0.5).slice(0, Math.min(countryCount, countries.length))
+            : countries;
+        const chosen = selectedCountries[Math.floor(Math.random() * selectedCountries.length)];
+        const proxies = proxyMap.get(chosen);
+        if (proxies && proxies.length > 0) return proxies[Math.floor(Math.random() * proxies.length)];
+    }
+
+    // 7. IP:Port langsung (contoh: /1.2.3.4:8080 atau /1.2.3.4=8080)
+    const ipPortMatch = pathname.match(/^\/([\d\.]+)[:=](\d+)$/);
+    if (ipPortMatch) return ipPortMatch[1] + ':' + ipPortMatch[2];
+
+    return null;
+}
 
 // ==================== FUNGSI HASH & KRIPTOGRAFI ====================
 function sha256(message) {
@@ -118,23 +256,11 @@ function sha256(message) {
             const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
             const maj = (a & b) ^ (a & c) ^ (b & c);
             const T2 = (S0 + maj) >>> 0;
-            h = g;
-            g = f;
-            f = e;
-            e = (d + T1) >>> 0;
-            d = c;
-            c = b;
-            b = a;
-            a = (T1 + T2) >>> 0;
+            h = g; g = f; f = e; e = (d + T1) >>> 0;
+            d = c; c = b; b = a; a = (T1 + T2) >>> 0;
         }
-        H[0] = (H[0] + a) >>> 0;
-        H[1] = (H[1] + b) >>> 0;
-        H[2] = (H[2] + c) >>> 0;
-        H[3] = (H[3] + d) >>> 0;
-        H[4] = (H[4] + e) >>> 0;
-        H[5] = (H[5] + f) >>> 0;
-        H[6] = (H[6] + g) >>> 0;
-        H[7] = (H[7] + h) >>> 0;
+        H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+        H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
     }
     const result = new Uint8Array(32);
     const rv = new DataView(result.buffer);
@@ -177,36 +303,18 @@ function md5(data, salt) {
         let [A, B, C, D] = [a0, b0, c0, d0];
         for (let j = 0; j < 64; j++) {
             let F, g;
-            if (j < 16) {
-                F = (B & C) | (~B & D);
-                g = j;
-            } else if (j < 32) {
-                F = (D & B) | (~D & C);
-                g = (5 * j + 1) % 16;
-            } else if (j < 48) {
-                F = B ^ C ^ D;
-                g = (3 * j + 5) % 16;
-            } else {
-                F = C ^ (B | ~D);
-                g = (7 * j) % 16;
-            }
+            if (j < 16) { F = (B & C) | (~B & D); g = j; }
+            else if (j < 32) { F = (D & B) | (~D & C); g = (5 * j + 1) % 16; }
+            else if (j < 48) { F = B ^ C ^ D; g = (3 * j + 5) % 16; }
+            else { F = C ^ (B | ~D); g = (7 * j) % 16; }
             F = (F + A + K[j] + M[g]) >>> 0;
-            A = D;
-            D = C;
-            C = B;
-            B = (B + rotl(F, S[j])) >>> 0;
+            A = D; D = C; C = B; B = (B + rotl(F, S[j])) >>> 0;
         }
-        a0 = (a0 + A) >>> 0;
-        b0 = (b0 + B) >>> 0;
-        c0 = (c0 + C) >>> 0;
-        d0 = (d0 + D) >>> 0;
+        a0 = (a0 + A) >>> 0; b0 = (b0 + B) >>> 0; c0 = (c0 + C) >>> 0; d0 = (d0 + D) >>> 0;
     }
     const result = new Uint8Array(16);
     const rv = new DataView(result.buffer);
-    rv.setUint32(0, a0, true);
-    rv.setUint32(4, b0, true);
-    rv.setUint32(8, c0, true);
-    rv.setUint32(12, d0, true);
+    rv.setUint32(0, a0, true); rv.setUint32(4, b0, true); rv.setUint32(8, c0, true); rv.setUint32(12, d0, true);
     return result;
 }
 
@@ -236,49 +344,27 @@ function toBuffer(uuidStr) {
 }
 
 async function aesGcmDecrypt(key, iv, data, aad) {
-    const cryptoKey = await crypto.subtle.importKey('raw', key, {
-        name: 'AES-GCM'
-    }, false, ['decrypt']);
-    const decrypted = await crypto.subtle.decrypt({
-            name: 'AES-GCM',
-            iv,
-            additionalData: aad || new Uint8Array(0),
-            tagLength: 128
-        },
-        cryptoKey, data
-    );
+    const cryptoKey = await crypto.subtle.importKey('raw', key, { name: 'AES-GCM' }, false, ['decrypt']);
+    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad || new Uint8Array(0), tagLength: 128 }, cryptoKey, data);
     return new Uint8Array(decrypted);
 }
 
 async function aesGcmEncrypt(key, iv, data, aad) {
-    const cryptoKey = await crypto.subtle.importKey('raw', key, {
-        name: 'AES-GCM'
-    }, false, ['encrypt']);
-    const encrypted = await crypto.subtle.encrypt({
-            name: 'AES-GCM',
-            iv,
-            additionalData: aad || new Uint8Array(0),
-            tagLength: 128
-        },
-        cryptoKey, data
-    );
+    const cryptoKey = await crypto.subtle.importKey('raw', key, { name: 'AES-GCM' }, false, ['encrypt']);
+    const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad || new Uint8Array(0), tagLength: 128 }, cryptoKey, data);
     return new Uint8Array(encrypted);
 }
 
 function connect({ hostname, port }) {
     const socket = net.connect(port, hostname);
-
     const readable = new ReadableStream({
         start(controller) {
             socket.on('data', (chunk) => controller.enqueue(new Uint8Array(chunk)));
             socket.on('end', () => controller.close());
             socket.on('error', (err) => controller.error(err));
         },
-        cancel() {
-            socket.destroy();
-        }
+        cancel() { socket.destroy(); }
     });
-
     const writable = new WritableStream({
         write(chunk) {
             return new Promise((resolve, reject) => {
@@ -288,16 +374,9 @@ function connect({ hostname, port }) {
                 });
             });
         },
-        close() {
-            return new Promise((resolve) => {
-                socket.end(resolve);
-            });
-        },
-        abort() {
-            socket.destroy();
-        }
+        close() { return new Promise((resolve) => { socket.end(resolve); }); },
+        abort() { socket.destroy(); }
     });
-
     return {
         readable,
         writable,
@@ -320,138 +399,31 @@ function getHtml(hostname) {
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        * {
-            transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
-        }
-        
-        .cloud-blur {
-            position: fixed;
-            border-radius: 50%;
-            filter: blur(80px);
-            pointer-events: none;
-            z-index: 0;
-            animation: floatCloud 20s ease-in-out infinite;
-        }
-        
-        @keyframes floatCloud {
-            0%, 100% { transform: translate(0, 0) scale(1); }
-            33% { transform: translate(30px, -30px) scale(1.1); }
-            66% { transform: translate(-20px, 20px) scale(0.9); }
-        }
-        
-        body {
-            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            color: #f1f5f9;
-        }
-        
-        body.light {
-            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
-            color: #0f172a;
-        }
-        
-        body.light .glass-deep {
-            background: rgba(255, 255, 255, 0.7);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.3);
-        }
-        
-        .glass-deep {
-            background: rgba(15, 23, 42, 0.5);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .dropdown-menu {
-            display: none;
-            position: absolute;
-            right: 0;
-            top: 100%;
-            margin-top: 0.5rem;
-            width: 220px;
-            z-index: 50;
-            background: rgba(30, 41, 59, 0.95);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            padding: 8px;
-            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
-        }
-
-        body.light .dropdown-menu {
-            background: rgba(255, 255, 255, 0.95);
-            border: 1px solid rgba(0, 0, 0, 0.05);
-        }
-
-        .dropdown-menu.show {
-            display: block;
-            animation: fadeIn 0.2s ease-out;
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(-10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        .action-btn { transition: all 0.2s ease; }
-        .action-btn:active { transform: scale(0.95); }
-        
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            padding: 2px 8px;
-            border-radius: 20px;
-            font-size: 11px;
-            font-weight: bold;
-        }
-        
-        .status-active {
-            background: rgba(16, 185, 129, 0.2);
-            color: #10b981;
-            border: 1px solid rgba(16, 185, 129, 0.3);
-        }
-        
-        .status-inactive {
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-            border: 1px solid rgba(239, 68, 68, 0.3);
-        }
-        
-        .status-checking {
-            background: rgba(59, 130, 246, 0.2);
-            color: #60a5fa;
-            border: 1px solid rgba(59, 130, 246, 0.3);
-        }
-        
-        .tooltip {
-            position: relative;
-            cursor: help;
-        }
-        
-        .tooltip:hover::after {
-            content: attr(data-tooltip);
-            position: absolute;
-            bottom: 100%;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0,0,0,0.9);
-            color: white;
-            padding: 4px 8px;
-            border-radius: 6px;
-            font-size: 10px;
-            white-space: nowrap;
-            z-index: 100;
-            margin-bottom: 5px;
-        }
+        * { transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease; }
+        .cloud-blur { position: fixed; border-radius: 50%; filter: blur(80px); pointer-events: none; z-index: 0; animation: floatCloud 20s ease-in-out infinite; }
+        @keyframes floatCloud { 0%, 100% { transform: translate(0, 0) scale(1); } 33% { transform: translate(30px, -30px) scale(1.1); } 66% { transform: translate(-20px, 20px) scale(0.9); } }
+        body { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); color: #f1f5f9; }
+        body.light { background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%); color: #0f172a; }
+        body.light .glass-deep { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.3); }
+        .glass-deep { background: rgba(15, 23, 42, 0.5); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .dropdown-menu { display: none; position: absolute; right: 0; top: 100%; margin-top: 0.5rem; width: 220px; z-index: 50; background: rgba(30, 41, 59, 0.95); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 8px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3); }
+        body.light .dropdown-menu { background: rgba(255, 255, 255, 0.95); border: 1px solid rgba(0, 0, 0, 0.05); }
+        .dropdown-menu.show { display: block; animation: fadeIn 0.2s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        .action-btn { transition: all 0.2s ease; } .action-btn:active { transform: scale(0.95); }
+        .status-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: bold; }
+        .status-active { background: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
+        .status-inactive { background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
+        .status-checking { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+        .tooltip { position: relative; cursor: help; }
+        .tooltip:hover::after { content: attr(data-tooltip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.9); color: white; padding: 4px 8px; border-radius: 6px; font-size: 10px; white-space: nowrap; z-index: 100; margin-bottom: 5px; }
     </style>
 </head>
 <body class="min-h-screen py-4 md:py-8 px-3 md:px-6 relative transition-colors duration-300">
-    
     <div class="cloud-blur w-[500px] h-[500px] top-[-150px] left-[-150px]" style="background: radial-gradient(circle, rgba(59,130,246,0.4) 0%, rgba(139,92,246,0.2) 100%);"></div>
     <div class="cloud-blur w-[600px] h-[600px] bottom-[-200px] right-[-200px]" style="background: radial-gradient(circle, rgba(6,182,212,0.3) 0%, rgba(59,130,246,0.15) 100%);"></div>
 
     <div class="max-w-7xl mx-auto relative z-10">
-        
         <div class="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
             <div class="text-center md:text-left">
                 <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full glass-deep text-xs font-semibold mb-3" style="color: #60a5fa;">
@@ -506,12 +478,9 @@ function getHtml(hostname) {
                     <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                         <i class="fas fa-search text-slate-500 group-focus-within:text-blue-400 transition-colors"></i>
                     </div>
-                    <input type="text" id="searchInput" 
-                        placeholder="Search country or ISP..."
-                        class="w-full bg-white/10 backdrop-blur-sm border rounded-xl py-3 pl-12 pr-4 focus:outline-none focus:ring-2 transition-all">
+                    <input type="text" id="searchInput" placeholder="Search country or ISP..." class="w-full bg-white/10 backdrop-blur-sm border rounded-xl py-3 pl-12 pr-4 focus:outline-none focus:ring-2 transition-all">
                 </div>
             </div>
-
             <div class="overflow-x-auto p-2 md:p-4">
                 <table class="w-full border-collapse">
                     <thead>
@@ -525,12 +494,10 @@ function getHtml(hostname) {
                     <tbody id="proxyTableBody"></tbody>
                 </table>
             </div>
-
             <div id="loading" class="py-24 text-center flex flex-col items-center gap-4">
                 <div class="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-blue-500"></div>
                 <p class="text-slate-400 text-sm">${atob('RmV0Y2hpbmcgcHJveHkgbGlzdC4uLg==')}</p>
             </div>
-
             <div class="p-4 md:p-6 border-t flex flex-col md:flex-row justify-between items-center gap-4" style="border-color: rgba(255,255,255,0.1);">
                 <div id="paginationInfo" class="text-slate-400 text-xs font-mono"></div>
                 <div class="flex gap-3 items-center" id="paginationControls"></div>
@@ -539,42 +506,32 @@ function getHtml(hostname) {
     </div>
 
     <script>
-        // ==================== THEME TOGGLE ====================
         const themeToggleBtn = document.getElementById('themeToggle');
         const bodyElement = document.body;
-        
         themeToggleBtn.addEventListener('click', () => {
             bodyElement.classList.toggle('light');
             const isLight = bodyElement.classList.contains('light');
             themeToggleBtn.innerHTML = isLight ? '<i class="fas fa-sun"></i>' : '<i class="fas fa-moon"></i>';
             localStorage.setItem('theme', isLight ? 'light' : 'dark');
         });
-
         if (localStorage.getItem('theme') === 'light') {
             bodyElement.classList.add('light');
             themeToggleBtn.innerHTML = '<i class="fas fa-sun"></i>';
         }
 
-        // ==================== HEALTH CHECK FETCH ====================
         async function fetchHealth() {
             try {
                 const resp = await fetch('/health');
                 const data = await resp.json();
                 document.getElementById('healthStatus').innerText = data.status === 'healthy' ? 'ONLINE' : 'DEGRADED';
                 document.getElementById('healthStatus').className = 'font-bold text-sm ' + (data.status === 'healthy' ? 'text-green-400' : 'text-red-400');
-                
-                // Uptime
                 const uptimeSec = Math.floor(data.uptime);
                 const h = Math.floor(uptimeSec / 3600);
                 const m = Math.floor((uptimeSec % 3600) / 60);
                 const s = uptimeSec % 60;
                 document.getElementById('uptimeDisplay').innerText = h > 0 ? h+'h '+m+'m '+s+'s' : m+'m '+s+'s';
-                
-                // RAM
                 const ramMB = Math.round(data.memory.heapUsed / 1024 / 1024);
                 document.getElementById('ramDisplay').innerText = ramMB + ' MB';
-                
-                // Node
                 document.getElementById('nodeDisplay').innerText = data.version || 'v?';
             } catch(e) {
                 document.getElementById('healthStatus').innerText = 'ERROR';
@@ -584,7 +541,6 @@ function getHtml(hostname) {
         fetchHealth();
         setInterval(fetchHealth, 5000);
 
-        // ==================== PROXY LOGIC (sama seperti sebelumnya) ====================
         const uuid = atob('${btoa(vmessUUID)}');
         const host = "${hostname}";
         const proxyListUrl = atob('${btoa(PROTOCOLS.PL_URL)}');
@@ -596,48 +552,28 @@ function getHtml(hostname) {
         const VLS_LBL = atob('${btoa(PROTOCOLS.VLS_LBL)}');
         const TRJ_LBL = atob('${btoa(PROTOCOLS.TRJ_LBL)}');
         const SS_LBL = atob('${btoa('W1NTLUdhdGNoYU5HXQ==')}');
-        
         const CHECK_API_URL = atob('aHR0cHM6Ly9jaGVjay5ncGozLndlYi5pZC9jaGVjaw==');
         const countryNameFormatter = new Intl.DisplayNames(['en'], { type: 'region' });
         
         function getCountryFullName(countryCode) {
             if (!countryCode) return 'Unknown';
-            try {
-                const upperCode = countryCode.toUpperCase();
-                const fullName = countryNameFormatter.of(upperCode);
-                return fullName || countryCode;
-            } catch (error) {
-                return countryCode;
-            }
+            try { return countryNameFormatter.of(countryCode.toUpperCase()) || countryCode; } catch { return countryCode; }
         }
 
-        let allProxies = [];
-        let filteredProxies = [];
-        let currentPage = 1;
+        let allProxies = [], filteredProxies = [], currentPage = 1;
         const itemsPerPage = 10;
         let statusCache = new Map();
 
         async function checkProxyStatus(ip, port) {
-            const cacheKey = \`\${ip}:\${port}\`;
+            const cacheKey = ip + ':' + port;
             if (statusCache.has(cacheKey)) return statusCache.get(cacheKey);
-            
             try {
-                const apiUrl = \`\${CHECK_API_URL}?ip=\${ip}:\${port}\`;
-                const response = await fetch(apiUrl);
+                const response = await fetch(CHECK_API_URL + '?ip=' + ip + ':' + port);
                 const data = await response.json();
-                const result = {
-                    status: data.status || 'UNKNOWN',
-                    delay: data.delay || 'N/A',
-                    speed: data.speed_est || 'N/A',
-                    isp: data.isp || '',
-                    country: data.country || '',
-                    asn: data.asn || '',
-                    colo: data.colo || ''
-                };
+                const result = { status: data.status || 'UNKNOWN', delay: data.delay || 'N/A', speed: data.speed_est || 'N/A', isp: data.isp || '', country: data.country || '', asn: data.asn || '', colo: data.colo || '' };
                 statusCache.set(cacheKey, result);
                 return result;
             } catch (error) {
-                console.error('Error checking proxy:', error);
                 const errorResult = { status: 'ERROR', delay: 'N/A', speed: 'N/A' };
                 statusCache.set(cacheKey, errorResult);
                 return errorResult;
@@ -651,24 +587,13 @@ function getHtml(hostname) {
                 const lines = text.trim().split('\\n');
                 allProxies = lines.map(line => {
                     const [ip, port, country, isp] = line.split(',');
-                    return { 
-                        ip, 
-                        port, 
-                        country: getCountryFullName(country), 
-                        isp, 
-                        countryCode: country,
-                        status: null,
-                        delay: null,
-                        speed: null
-                    };
+                    return { ip, port, country: getCountryFullName(country), isp, countryCode: country, status: null, delay: null, speed: null };
                 }).filter(p => p.ip && p.port);
                 filteredProxies = [...allProxies];
                 renderTable();
                 document.getElementById('loading').classList.add('hidden');
                 checkAllProxyStatuses();
-            } catch (error) {
-                console.error('Error:', error);
-            }
+            } catch (error) { console.error('Error:', error); }
         }
         
         async function checkAllProxyStatuses() {
@@ -678,10 +603,7 @@ function getHtml(hostname) {
                 await Promise.all(batch.map(async (proxy, idx) => {
                     const globalIdx = i + idx;
                     const statusData = await checkProxyStatus(proxy.ip, proxy.port);
-                    proxy.status = statusData.status;
-                    proxy.delay = statusData.delay;
-                    proxy.speed = statusData.speed;
-                    proxy.checkInfo = statusData;
+                    proxy.status = statusData.status; proxy.delay = statusData.delay; proxy.speed = statusData.speed; proxy.checkInfo = statusData;
                     updateProxyRowInTable(globalIdx, proxy);
                 }));
             }
@@ -706,39 +628,26 @@ function getHtml(hostname) {
             const vmessObj = { v: "2", ps: VMS_LBL + " " + proxy.country + " - " + proxy.isp, add: host, port: 443, id: uuid, aid: "0", scy: "zero", net: "ws", type: "none", host: host, path: path, tls: "tls", sni: host };
             return VMS_PRE + btoa(JSON.stringify(vmessObj));
         }
-
         function generateVless(proxy) {
             const path = encodeURIComponent(OBFS_PATH + proxy.ip + "=" + proxy.port);
             return VLS_PRE + uuid + "@" + host + ":443?encryption=none&security=tls&type=ws&host=" + host + "&path=" + path + "&sni=" + host + "#" + encodeURIComponent(VLS_LBL + " " + proxy.country);
         }
-
         function generateTrojan(proxy) {
             const path = encodeURIComponent(OBFS_PATH + proxy.ip + "=" + proxy.port);
             return TRJ_PRE + uuid + "@" + host + ":443?security=tls&type=ws&host=" + host + "&path=" + path + "&sni=" + host + "#" + encodeURIComponent(TRJ_LBL + " " + proxy.country);
         }
-
         function generateShadowsocks(proxy) {
-            const method = "none";
-            const password = uuid;
-            const encodedAuth = btoa(\`\${method}:\${password}\`);
+            const method = "none", password = uuid;
+            const encodedAuth = btoa(method + ':' + password);
             const path = encodeURIComponent(OBFS_PATH + proxy.ip + "=" + proxy.port);
-            const ssUrl = \`ss://\${encodedAuth}@\${host}:443?path=\${path}&security=tls&host=\${host}&type=ws&sni=\${host}#\${encodeURIComponent(SS_LBL + " " + proxy.country)}\`;
-            return ssUrl;
+            return 'ss://' + encodedAuth + '@' + host + ':443?path=' + path + '&security=tls&host=' + host + '&type=ws&sni=' + host + '#' + encodeURIComponent(SS_LBL + " " + proxy.country);
         }
 
         function toggleDropdown(id) {
-            document.querySelectorAll('.dropdown-menu').forEach(el => {
-                if(el.id !== 'drop-' + id) el.classList.remove('show');
-            });
+            document.querySelectorAll('.dropdown-menu').forEach(el => { if(el.id !== 'drop-' + id) el.classList.remove('show'); });
             document.getElementById('drop-' + id).classList.toggle('show');
         }
-
-        window.onclick = function(event) {
-            if (!event.target.closest('.dropdown-container')) {
-                document.querySelectorAll('.dropdown-menu').forEach(el => el.classList.remove('show'));
-            }
-        }
-
+        window.onclick = function(event) { if (!event.target.closest('.dropdown-container')) { document.querySelectorAll('.dropdown-menu').forEach(el => el.classList.remove('show')); } }
         function copyToClipboard(text, btn) {
             navigator.clipboard.writeText(text).then(() => {
                 const original = btn.innerHTML;
@@ -746,40 +655,13 @@ function getHtml(hostname) {
                 setTimeout(() => { btn.innerHTML = original; }, 1500);
             });
         }
-        
         function getStatusHtml(proxy) {
-            if (!proxy.status) {
-                return \`
-                    <div class="status-badge status-checking">
-                        <i class="fas fa-spinner fa-pulse"></i>
-                        <span>Checking...</span>
-                    </div>
-                \`;
-            }
+            if (!proxy.status) return '<div class="status-badge status-checking"><i class="fas fa-spinner fa-pulse"></i><span>Checking...</span></div>';
             const isActive = proxy.status === 'ACTIVE';
-            const tooltipText = \`Delay: \${proxy.delay} | Speed: \${proxy.speed}\`;
-            if (isActive) {
-                return \`
-                    <div class="status-badge status-active tooltip" data-tooltip="\${tooltipText}">
-                        <i class="fas fa-check-circle animate-pulse text-green-500"></i>
-                        <span class="animate-pulse text-green-500 font-semibold">ACTIVE</span>
-                    </div>
-                \`;
-            } else if (proxy.status === 'ERROR') {
-                return \`
-                    <div class="status-badge status-inactive tooltip" data-tooltip="Connection failed">
-                        <i class="fas fa-exclamation-triangle"></i>
-                        <span>ERROR</span>
-                    </div>
-                \`;
-            } else {
-                return \`
-                    <div class="status-badge status-inactive">
-                        <i class="fas fa-times-circle"></i>
-                        <span>INACTIVE</span>
-                    </div>
-                \`;
-            }
+            const tooltipText = 'Delay: ' + proxy.delay + ' | Speed: ' + proxy.speed;
+            if (isActive) return '<div class="status-badge status-active tooltip" data-tooltip="' + tooltipText + '"><i class="fas fa-check-circle animate-pulse text-green-500"></i><span class="animate-pulse text-green-500 font-semibold">ACTIVE</span></div>';
+            else if (proxy.status === 'ERROR') return '<div class="status-badge status-inactive tooltip" data-tooltip="Connection failed"><i class="fas fa-exclamation-triangle"></i><span>ERROR</span></div>';
+            else return '<div class="status-badge status-inactive"><i class="fas fa-times-circle"></i><span>INACTIVE</span></div>';
         }
 
         function renderTable() {
@@ -787,81 +669,33 @@ function getHtml(hostname) {
             const paged = filteredProxies.slice(start, start + itemsPerPage);
             const tbody = document.getElementById('proxyTableBody');
             tbody.innerHTML = '';
-
             paged.forEach((proxy, idx) => {
                 const id = start + idx;
-                const vmess = generateVmess(proxy);
-                const vless = generateVless(proxy);
-                const trojan = generateTrojan(proxy);
-                const shadowsocks = generateShadowsocks(proxy);
-
-                tbody.innerHTML += \`
-                    <tr class="border-b border-white/5 hover:bg-white/5 transition-all">
-                        <td class="py-4 px-4">
-                            <div class="flex items-center gap-3">
-                                <span class="text-2xl">\${getFlagEmoji(proxy.countryCode)}</span>
-                                <div>
-                                    <div class="font-bold text-sm md:text-base">\${proxy.country}</div>
-                                    <div class="text-[11px] text-slate-400 font-mono">\${proxy.ip}:\${proxy.port}</div>
-                                </div>
-                            </div>
-                        </td>
-                        <td class="py-4 px-4">
-                            <div class="text-sm">\${proxy.isp || '-'}</div>
-                        </td>
-                        <td class="py-4 px-4 text-center status-cell">
-                            \${getStatusHtml(proxy)}
-                        </td>
-                        <td class="py-4 px-4 text-right relative dropdown-container">
-                            <button onclick="toggleDropdown('\${id}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all inline-flex items-center gap-2">
-                                <i class="fas fa-cog"></i> Config <i class="fas fa-chevron-down text-[10px]"></i>
-                            </button>
-                            
-                            <div id="drop-\${id}" class="dropdown-menu">
-                                <div class="grid grid-cols-2 gap-2">
-                                    <button onclick="copyToClipboard('\${vless}', this)" class="bg-indigo-600 hover:bg-indigo-700 p-2 rounded-md text-[10px] font-bold text-white flex flex-col items-center gap-1">
-                                        <i class="fas fa-link"></i> VLESS
-                                    </button>
-                                    <button onclick="copyToClipboard('\${trojan}', this)" class="bg-purple-600 hover:bg-purple-700 p-2 rounded-md text-[10px] font-bold text-white flex flex-col items-center gap-1">
-                                        <i class="fas fa-shield-halved"></i> TROJAN
-                                    </button>
-                                    <button onclick="copyToClipboard('\${shadowsocks}', this)" class="bg-cyan-600 hover:bg-cyan-700 p-2 rounded-md text-[10px] font-bold text-white flex flex-col items-center gap-1">
-                                        <i class="fas fa-lock"></i> SS GatchaNG
-                                    </button>
-                                    <button onclick="copyToClipboard('\${vmess}', this)" class="bg-emerald-600 hover:bg-emerald-700 p-2 rounded-md text-[10px] font-bold text-white flex flex-col items-center gap-1">
-                                        <i class="fas fa-bolt"></i> VMESS
-                                    </button>
-                                </div>
-                            </div>
-                         </td>
-                     </tr>
-                \`;
+                const vmess = generateVmess(proxy), vless = generateVless(proxy), trojan = generateTrojan(proxy), shadowsocks = generateShadowsocks(proxy);
+                tbody.innerHTML += '<tr class="border-b border-white/5 hover:bg-white/5 transition-all">' +
+                    '<td class="py-4 px-4"><div class="flex items-center gap-3"><span class="text-2xl">' + getFlagEmoji(proxy.countryCode) + '</span><div><div class="font-bold text-sm md:text-base">' + proxy.country + '</div><div class="text-[11px] text-slate-400 font-mono">' + proxy.ip + ':' + proxy.port + '</div></div></div></td>' +
+                    '<td class="py-4 px-4"><div class="text-sm">' + (proxy.isp || '-') + '</div></td>' +
+                    '<td class="py-4 px-4 text-center status-cell">' + getStatusHtml(proxy) + '</td>' +
+                    '<td class="py-4 px-4 text-right relative dropdown-container">' +
+                    '<button onclick="toggleDropdown(\\'' + id + '\\')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all inline-flex items-center gap-2"><i class="fas fa-cog"></i> Config <i class="fas fa-chevron-down text-[10px]"></i></button>' +
+                    '<div id="drop-' + id + '" class="dropdown-menu"><div class="grid grid-cols-2 gap-2">' +
+                    '<button onclick="copyToClipboard(\\'' + vless + '\\', this)" class="bg-indigo-600 hover:bg-indigo-700 p-2 rounded-md text-[10px] font-bold text-white flex flex-col items-center gap-1"><i class="fas fa-link"></i> VLESS</button>' +
+                    '<button onclick="copyToClipboard(\\'' + trojan + '\\', this)" class="bg-purple-600 hover:bg-purple-700 p-2 rounded-md text-[10px] font-bold text-white flex flex-col items-center gap-1"><i class="fas fa-shield-halved"></i> TROJAN</button>' +
+                    '<button onclick="copyToClipboard(\\'' + shadowsocks + '\\', this)" class="bg-cyan-600 hover:bg-cyan-700 p-2 rounded-md text-[10px] font-bold text-white flex flex-col items-center gap-1"><i class="fas fa-lock"></i> SS GatchaNG</button>' +
+                    '<button onclick="copyToClipboard(\\'' + vmess + '\\', this)" class="bg-emerald-600 hover:bg-emerald-700 p-2 rounded-md text-[10px] font-bold text-white flex flex-col items-center gap-1"><i class="fas fa-bolt"></i> VMESS</button>' +
+                    '</div></div></td></tr>';
             });
             updatePagination();
         }
 
         function updatePagination() {
             const totalPages = Math.ceil(filteredProxies.length / itemsPerPage);
-            const info = document.getElementById('paginationInfo');
-            if (info) info.innerText = \`Page \${currentPage} of \${totalPages}\`;
+            document.getElementById('paginationInfo').innerText = 'Page ' + currentPage + ' of ' + totalPages;
             const controls = document.getElementById('paginationControls');
-            if (!controls) return;
             controls.innerHTML = '';
-            
             const btnClass = "px-3 py-1 rounded-lg bg-white/5 border border-white/10 text-xs hover:bg-white/10 disabled:opacity-30";
-            
-            const prev = document.createElement('button');
-            prev.className = btnClass;
-            prev.innerHTML = '<i class="fas fa-chevron-left"></i> Prev';
-            prev.disabled = currentPage === 1;
-            prev.onclick = () => { currentPage--; renderTable(); };
-            
-            const next = document.createElement('button');
-            next.className = btnClass;
-            next.innerHTML = 'Next <i class="fas fa-chevron-right"></i>';
-            next.disabled = currentPage === totalPages;
-            next.onclick = () => { currentPage++; renderTable(); };
-            
+            const prev = document.createElement('button'); prev.className = btnClass; prev.innerHTML = '<i class="fas fa-chevron-left"></i> Prev'; prev.disabled = currentPage === 1; prev.onclick = () => { currentPage--; renderTable(); };
+            const next = document.createElement('button'); next.className = btnClass; next.innerHTML = 'Next <i class="fas fa-chevron-right"></i>'; next.disabled = currentPage === totalPages; next.onclick = () => { currentPage++; renderTable(); };
             controls.append(prev, next);
         }
 
@@ -874,8 +708,7 @@ function getHtml(hostname) {
         document.getElementById('searchInput').oninput = (e) => {
             const query = e.target.value.toLowerCase();
             filteredProxies = allProxies.filter(p => p.country.toLowerCase().includes(query) || p.isp.toLowerCase().includes(query));
-            currentPage = 1;
-            renderTable();
+            currentPage = 1; renderTable();
         };
 
         fetchProxies();
@@ -886,18 +719,14 @@ function getHtml(hostname) {
 
 // ==================== HANDLER WEBSOCKET ====================
 async function websocketHandler(ws, req, pxip) {
-    let addressLog = "",
-        portLog = "";
+    let addressLog = "", portLog = "";
     const log = (info, event) => console.log(`[${addressLog}:${portLog}] ${info}`, event || "");
 
     const earlyDataHeader = req.headers["sec-websocket-protocol"] || "";
     const readableWebSocketStream = createReadableWebSocketStream(ws, earlyDataHeader, log);
 
-    let remoteSocketWrapper = {
-        value: null
-    };
-    let udpStreamWrite = null,
-        isDNS = false;
+    let remoteSocketWrapper = { value: null };
+    let udpStreamWrite = null, isDNS = false;
 
     readableWebSocketStream.pipeTo(new WritableStream({
         async write(chunk, controller) {
@@ -917,9 +746,7 @@ async function websocketHandler(ws, req, pxip) {
             else if (protocol === PROTOCOLS.P2) protocolHeader = parseP2Header(bufferChunk);
             else if (protocol === PROTOCOLS.P4) protocolHeader = await parseP4Header(bufferChunk);
             else if (protocol === PROTOCOLS.P3) protocolHeader = parseP3Header(bufferChunk);
-            else {
-                throw new Error("Unknown Protocol!");
-            }
+            else throw new Error("Unknown Protocol!");
 
             addressLog = protocolHeader.addressRemote;
             portLog = `${protocolHeader.portRemote} -> ${protocolHeader.isUDP ? "UDP" : "TCP"}`;
@@ -931,9 +758,7 @@ async function websocketHandler(ws, req, pxip) {
             }
 
             if (isDNS) {
-                const {
-                    write
-                } = await handleUDPOutbound(ws, protocolHeader.version, log);
+                const { write } = await handleUDPOutbound(ws, protocolHeader.version, log);
                 udpStreamWrite = write;
                 udpStreamWrite(protocolHeader.rawClientData);
                 return;
@@ -942,15 +767,13 @@ async function websocketHandler(ws, req, pxip) {
             handleTCPOutbound(remoteSocketWrapper, protocolHeader.addressRemote, protocolHeader.portRemote,
                 protocolHeader.rawClientData, ws, protocolHeader.version, log, pxip);
         },
-        close() {
-            log(`readableWebSocketStream closed`);
-        },
-        abort(reason) {
-            log(`readableWebSocketStream aborted`, JSON.stringify(reason));
-        },
+        close() { log(`readableWebSocketStream closed`); },
+        abort(reason) { log(`readableWebSocketStream aborted`, JSON.stringify(reason)); },
     })).catch((err) => log("pipeTo error", err));
 }
 
+// Semua fungsi protocol handler (detectProtocol, isVMess, parseP4Header, parseP3Header, parseP2Header, parseP1Header)
+// ... (sama persis dengan yang ada di kode pertama, tidak dipersingkat)
 async function detectProtocol(buffer) {
     if (await isVMess(buffer)) return PROTOCOLS.P4;
     if (buffer.byteLength >= DETECTION_PATTERNS.BUFFER_MIN_SIZE) {
@@ -963,7 +786,6 @@ async function detectProtocol(buffer) {
     const uuidCheck = buffer.slice(1, 17);
     const hexString = arrayBufferToHex(uuidCheck.buffer);
     if (DETECTION_PATTERNS.UUID_V4_REGEX.test(hexString)) return PROTOCOLS.P2;
-
     return PROTOCOLS.P3;
 }
 
@@ -980,9 +802,7 @@ async function isVMess(buffer) {
         const decryptedLen = await aesGcmDecrypt(header_length_key, header_length_nonce, len_encrypted, auth_id);
         const header_length = (decryptedLen[0] << 8) | decryptedLen[1];
         return header_length > 0 && header_length < 4096;
-    } catch (e) {
-        return false;
-    }
+    } catch (e) { return false; }
 }
 
 async function parseP4Header(buffer) {
@@ -993,151 +813,68 @@ async function parseP4Header(buffer) {
     remaining = remaining.subarray(18);
     const nonce = remaining.subarray(0, 8);
     remaining = remaining.subarray(8);
-
     const key = md5(uuidBytes, str2arr(atob('YzQ4NjE5ZmUtOGYwMi00OWUwLWI5ZTktZWRmNzYzZTE3ZTIx')));
     const mainKey = key;
-
     const header_length_key = kdf(key, [KDFSALT_CONST_VMESS_HEADER_PAYLOAD_LENGTH_AEAD_KEY, auth_id, nonce]).subarray(0, 16);
     const header_length_nonce = kdf(key, [KDFSALT_CONST_VMESS_HEADER_PAYLOAD_LENGTH_AEAD_IV, auth_id, nonce]).subarray(0, 12);
-
     const decryptedLen = await aesGcmDecrypt(header_length_key, header_length_nonce, len_encrypted, auth_id);
     const header_length = (decryptedLen[0] << 8) | decryptedLen[1];
-
     const cmd_encrypted = remaining.subarray(0, header_length + 16);
     const rawClientData = remaining.subarray(header_length + 16);
-
     const payload_key = kdf(mainKey, [KDFSALT_CONST_VMESS_HEADER_PAYLOAD_AEAD_KEY, auth_id, nonce]).subarray(0, 16);
     const payload_nonce = kdf(mainKey, [KDFSALT_CONST_VMESS_HEADER_PAYLOAD_AEAD_IV, auth_id, nonce]).subarray(0, 12);
     const cmdBuf = await aesGcmDecrypt(payload_key, payload_nonce, cmd_encrypted, auth_id);
-
     const iv = cmdBuf.subarray(1, 17);
     const keyResp = cmdBuf.subarray(17, 33);
     const responseAuth = cmdBuf[33];
     const portRemote = (cmdBuf[38] << 8) | cmdBuf[39];
     const addrType = cmdBuf[40];
     let addressRemote = "";
-
-    if (addrType === 1) {
-        addressRemote = `${cmdBuf[41]}.${cmdBuf[42]}.${cmdBuf[43]}.${cmdBuf[44]}`;
-    } else if (addrType === 2) {
-        const len = cmdBuf[41];
-        addressRemote = arr2str(cmdBuf.subarray(42, 42 + len));
-    } else if (addrType === 3) {
-        const parts = [];
-        for (let i = 0; i < 8; i++) parts.push(((cmdBuf[41 + i * 2] << 8) | cmdBuf[41 + i * 2 + 1]).toString(16));
-        addressRemote = parts.join(':');
-    }
-
+    if (addrType === 1) addressRemote = `${cmdBuf[41]}.${cmdBuf[42]}.${cmdBuf[43]}.${cmdBuf[44]}`;
+    else if (addrType === 2) { const len = cmdBuf[41]; addressRemote = arr2str(cmdBuf.subarray(42, 42 + len)); }
+    else if (addrType === 3) { const parts = []; for (let i = 0; i < 8; i++) parts.push(((cmdBuf[41 + i * 2] << 8) | cmdBuf[41 + i * 2 + 1]).toString(16)); addressRemote = parts.join(':'); }
     const respKeyBase = sha256(keyResp).subarray(0, 16);
     const respIvBase = sha256(iv).subarray(0, 16);
-
     const length_key = kdf(respKeyBase, [KDFSALT_CONST_AEAD_RESP_HEADER_LEN_KEY]).subarray(0, 16);
     const length_iv = kdf(respIvBase, [KDFSALT_CONST_AEAD_RESP_HEADER_LEN_IV]).subarray(0, 12);
     const encryptedLength = await aesGcmEncrypt(length_key, length_iv, new Uint8Array([0, 4]));
-
     const payload_key_resp = kdf(respKeyBase, [KDFSALT_CONST_AEAD_RESP_HEADER_KEY]).subarray(0, 16);
     const payload_iv_resp = kdf(respIvBase, [KDFSALT_CONST_AEAD_RESP_HEADER_IV]).subarray(0, 12);
     const encryptedHeaderPayload = await aesGcmEncrypt(payload_key_resp, payload_iv_resp, new Uint8Array([responseAuth, 0, 0, 0]));
-
-    return {
-        hasError: false,
-        addressRemote,
-        portRemote,
-        rawClientData,
-        version: concat(encryptedLength, encryptedHeaderPayload),
-        isUDP: portRemote === DNS_PORT
-    };
+    return { hasError: false, addressRemote, portRemote, rawClientData, version: concat(encryptedLength, encryptedHeaderPayload), isUDP: portRemote === DNS_PORT };
 }
 
 function parseP3Header(buffer) {
     const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     const addressType = view.getUint8(0);
-    let addressLength = 0,
-        addressValueIndex = 1,
-        addressValue = "";
-
+    let addressLength = 0, addressValueIndex = 1, addressValue = "";
     switch (addressType) {
-        case ADDRESS_TYPES.IPV4:
-            addressLength = 4;
-            addressValue = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
-            break;
-        case ADDRESS_TYPES.DOMAIN_ALT:
-            addressLength = buffer[addressValueIndex];
-            addressValueIndex += 1;
-            addressValue = arr2str(buffer.slice(addressValueIndex, addressValueIndex + addressLength));
-            break;
-        case ADDRESS_TYPES.IPV6:
-            addressLength = 16;
-            const dv = new DataView(buffer.slice(addressValueIndex, addressValueIndex + addressLength).buffer);
-            const ipv6 = [];
-            for (let i = 0; i < 8; i++) ipv6.push(dv.getUint16(i * 2).toString(16));
-            addressValue = ipv6.join(":");
-            break;
-        default:
-            return { hasError: true, message: `Invalid addressType for P3: ${addressType}` };
+        case ADDRESS_TYPES.IPV4: addressLength = 4; addressValue = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + addressLength)).join("."); break;
+        case ADDRESS_TYPES.DOMAIN_ALT: addressLength = buffer[addressValueIndex]; addressValueIndex += 1; addressValue = arr2str(buffer.slice(addressValueIndex, addressValueIndex + addressLength)); break;
+        case ADDRESS_TYPES.IPV6: addressLength = 16; const dv = new DataView(buffer.slice(addressValueIndex, addressValueIndex + addressLength).buffer); const ipv6 = []; for (let i = 0; i < 8; i++) ipv6.push(dv.getUint16(i * 2).toString(16)); addressValue = ipv6.join(":"); break;
+        default: return { hasError: true, message: `Invalid addressType for P3: ${addressType}` };
     }
-
     const portIndex = addressValueIndex + addressLength;
-    const portBuffer = buffer.slice(portIndex, portIndex + 2);
-    const portRemote = new DataView(portBuffer.buffer, portBuffer.byteOffset, 2).getUint16(0);
-
-    return {
-        hasError: false,
-        addressRemote: addressValue,
-        portRemote,
-        rawClientData: buffer.slice(portIndex + 2),
-        version: null,
-        isUDP: portRemote == DNS_PORT
-    };
+    const portRemote = new DataView(buffer.slice(portIndex, portIndex + 2).buffer, buffer.byteOffset, 2).getUint16(0);
+    return { hasError: false, addressRemote: addressValue, portRemote, rawClientData: buffer.slice(portIndex + 2), version: null, isUDP: portRemote == DNS_PORT };
 }
 
 function parseP2Header(buffer) {
-    const version = buffer[0];
-    let isUDP = false;
-    const optLength = buffer[17];
-    const cmd = buffer[18 + optLength];
-
+    const version = buffer[0]; let isUDP = false;
+    const optLength = buffer[17]; const cmd = buffer[18 + optLength];
     if (cmd === COMMAND_TYPES.UDP) isUDP = true;
-
     const portIndex = 18 + optLength + 1;
-    const portBuffer = buffer.slice(portIndex, portIndex + 2);
-    const portRemote = new DataView(portBuffer.buffer, portBuffer.byteOffset, 2).getUint16(0);
-
+    const portRemote = new DataView(buffer.slice(portIndex, portIndex + 2).buffer, buffer.byteOffset, 2).getUint16(0);
     let addressIndex = portIndex + 2;
     const addressType = buffer[addressIndex];
-    let addressLength = 0,
-        addressValueIndex = addressIndex + 1,
-        addressValue = "";
-
+    let addressLength = 0, addressValueIndex = addressIndex + 1, addressValue = "";
     switch (addressType) {
-        case ADDRESS_TYPES.IPV4:
-            addressLength = 4;
-            addressValue = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
-            break;
-        case ADDRESS_TYPES.DOMAIN:
-            addressLength = buffer[addressValueIndex];
-            addressValueIndex += 1;
-            addressValue = arr2str(buffer.slice(addressValueIndex, addressValueIndex + addressLength));
-            break;
-        case ADDRESS_TYPES.IPV6:
-            addressLength = 16;
-            const dv = new DataView(buffer.slice(addressValueIndex, addressValueIndex + addressLength).buffer);
-            const ipv6 = [];
-            for (let i = 0; i < 8; i++) ipv6.push(dv.getUint16(i * 2).toString(16));
-            addressValue = ipv6.join(":");
-            break;
-        default:
-            return { hasError: true, message: `Invalid addressType: ${addressType}` };
+        case ADDRESS_TYPES.IPV4: addressLength = 4; addressValue = new Uint8Array(buffer.slice(addressValueIndex, addressValueIndex + addressLength)).join("."); break;
+        case ADDRESS_TYPES.DOMAIN: addressLength = buffer[addressValueIndex]; addressValueIndex += 1; addressValue = arr2str(buffer.slice(addressValueIndex, addressValueIndex + addressLength)); break;
+        case ADDRESS_TYPES.IPV6: addressLength = 16; const dv = new DataView(buffer.slice(addressValueIndex, addressValueIndex + addressLength).buffer); const ipv6 = []; for (let i = 0; i < 8; i++) ipv6.push(dv.getUint16(i * 2).toString(16)); addressValue = ipv6.join(":"); break;
+        default: return { hasError: true, message: `Invalid addressType: ${addressType}` };
     }
-
-    return {
-        hasError: false,
-        addressRemote: addressValue,
-        portRemote,
-        rawClientData: buffer.slice(addressValueIndex + addressLength),
-        version: new Uint8Array([version, 0]),
-        isUDP
-    };
+    return { hasError: false, addressRemote: addressValue, portRemote, rawClientData: buffer.slice(addressValueIndex + addressLength), version: new Uint8Array([version, 0]), isUDP };
 }
 
 function parseP1Header(buffer) {
@@ -1146,82 +883,37 @@ function parseP1Header(buffer) {
     const view = new DataView(dataBuffer.buffer, dataBuffer.byteOffset, dataBuffer.byteLength);
     const cmd = view.getUint8(0);
     if (cmd == COMMAND_TYPES.UDP_ALT) isUDP = true;
-
     let addressType = view.getUint8(1);
-    let addressLength = 0,
-        addressValueIndex = 2,
-        addressValue = "";
-
+    let addressLength = 0, addressValueIndex = 2, addressValue = "";
     switch (addressType) {
-        case ADDRESS_TYPES.IPV4:
-            addressLength = 4;
-            addressValue = new Uint8Array(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
-            break;
-        case ADDRESS_TYPES.DOMAIN_ALT:
-            addressLength = dataBuffer[addressValueIndex];
-            addressValueIndex += 1;
-            addressValue = arr2str(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
-            break;
-        case ADDRESS_TYPES.IPV6:
-            addressLength = 16;
-            const dv = new DataView(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength).buffer);
-            const ipv6 = [];
-            for (let i = 0; i < 8; i++) ipv6.push(dv.getUint16(i * 2).toString(16));
-            addressValue = ipv6.join(":");
-            break;
-        default:
-            return { hasError: true, message: `Invalid addressType: ${addressType}` };
+        case ADDRESS_TYPES.IPV4: addressLength = 4; addressValue = new Uint8Array(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join("."); break;
+        case ADDRESS_TYPES.DOMAIN_ALT: addressLength = dataBuffer[addressValueIndex]; addressValueIndex += 1; addressValue = arr2str(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength)); break;
+        case ADDRESS_TYPES.IPV6: addressLength = 16; const dv = new DataView(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength).buffer); const ipv6 = []; for (let i = 0; i < 8; i++) ipv6.push(dv.getUint16(i * 2).toString(16)); addressValue = ipv6.join(":"); break;
+        default: return { hasError: true, message: `Invalid addressType: ${addressType}` };
     }
-
     const portIndex = addressValueIndex + addressLength;
-    const portBuffer = dataBuffer.slice(portIndex, portIndex + 2);
-    const portRemote = new DataView(portBuffer.buffer, portBuffer.byteOffset, 2).getUint16(0);
-
-    return {
-        hasError: false,
-        addressRemote: addressValue,
-        portRemote,
-        rawClientData: dataBuffer.slice(portIndex + 4),
-        version: null,
-        isUDP
-    };
+    const portRemote = new DataView(dataBuffer.slice(portIndex, portIndex + 2).buffer, dataBuffer.byteOffset, 2).getUint16(0);
+    return { hasError: false, addressRemote: addressValue, portRemote, rawClientData: dataBuffer.slice(portIndex + 4), version: null, isUDP };
 }
 
 async function remoteSocketToWS(remoteSocket, ws, responseHeader, retry, log) {
-    let header = responseHeader,
-        hasIncomingData = false;
+    let header = responseHeader, hasIncomingData = false;
     await remoteSocket.readable.pipeTo(new WritableStream({
         async write(chunk, controller) {
             hasIncomingData = true;
             if (ws.readyState !== WS_READY_STATE_OPEN) controller.error("ws closed");
-            if (header) {
-                const combined = concat(header, chunk);
-                ws.send(combined);
-                header = null;
-            } else ws.send(chunk);
+            if (header) { ws.send(concat(header, chunk)); header = null; }
+            else ws.send(chunk);
         },
-        close() {
-            log(`remoteConnection readable closed, hasData: ${hasIncomingData}`);
-        },
-        abort(reason) {
-            console.error(`remoteConnection abort`, reason);
-        },
-    })).catch((error) => {
-        console.error(`remoteSocketToWS error`, error.stack || error);
-        safeCloseWebSocket(ws);
-    });
-    if (!hasIncomingData && retry) {
-        log(`retrying`);
-        retry();
-    }
+        close() { log(`remoteConnection readable closed, hasData: ${hasIncomingData}`); },
+        abort(reason) { console.error(`remoteConnection abort`, reason); },
+    })).catch((error) => { console.error(`remoteSocketToWS error`, error.stack || error); safeCloseWebSocket(ws); });
+    if (!hasIncomingData && retry) { log(`retrying`); retry(); }
 }
 
 async function handleTCPOutbound(remoteSocket, addressRemote, portRemote, rawClientData, ws, responseHeader, log, pxip) {
     async function connectAndWrite(address, port) {
-        const tcpSocket = connect({
-            hostname: address,
-            port
-        });
+        const tcpSocket = connect({ hostname: address, port });
         remoteSocket.value = tcpSocket;
         log(`connected to ${address}:${port}`);
         const writer = tcpSocket.writable.getWriter();
@@ -1231,10 +923,7 @@ async function handleTCPOutbound(remoteSocket, addressRemote, portRemote, rawCli
     }
     async function retry() {
         const parts = pxip?.split(':') || [];
-        const tcpSocket = await connectAndWrite(
-            parts[0] || addressRemote,
-            parseInt(parts[1]) || portRemote
-        );
+        const tcpSocket = await connectAndWrite(parts[0] || addressRemote, parseInt(parts[1]) || portRemote);
         tcpSocket.closed.finally(() => safeCloseWebSocket(ws));
         remoteSocketToWS(tcpSocket, ws, responseHeader, null, log);
     }
@@ -1246,28 +935,14 @@ function createReadableWebSocketStream(ws, earlyDataHeader, log) {
     let readableStreamCancel = false;
     return new ReadableStream({
         start(controller) {
-            ws.on("message", (data) => {
-                if (!readableStreamCancel) controller.enqueue(new Uint8Array(data));
-            });
-            ws.on("close", () => {
-                safeCloseWebSocket(ws);
-                if (!readableStreamCancel) controller.close();
-            });
-            ws.on("error", (err) => {
-                log("ws error");
-                controller.error(err);
-            });
+            ws.on("message", (data) => { if (!readableStreamCancel) controller.enqueue(new Uint8Array(data)); });
+            ws.on("close", () => { safeCloseWebSocket(ws); if (!readableStreamCancel) controller.close(); });
+            ws.on("error", (err) => { log("ws error"); controller.error(err); });
             const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
             if (error) controller.error(error);
             else if (earlyData) controller.enqueue(new Uint8Array(earlyData));
         },
-        cancel(reason) {
-            if (!readableStreamCancel) {
-                log(`Stream canceled: ${reason}`);
-                readableStreamCancel = true;
-                safeCloseWebSocket(ws);
-            }
-        },
+        cancel(reason) { if (!readableStreamCancel) { log(`Stream canceled: ${reason}`); readableStreamCancel = true; safeCloseWebSocket(ws); } },
     });
 }
 
@@ -1275,18 +950,11 @@ function base64ToArrayBuffer(base64Str) {
     if (!base64Str) return { error: null };
     try {
         const decode = atob(base64Str.replace(/-/g, "+").replace(/_/g, "/"));
-        return {
-            earlyData: Uint8Array.from(decode, c => c.charCodeAt(0)).buffer,
-            error: null
-        };
-    } catch (error) {
-        return { error };
-    }
+        return { earlyData: Uint8Array.from(decode, c => c.charCodeAt(0)).buffer, error: null };
+    } catch (error) { return { error }; }
 }
 
-function arrayBufferToHex(buffer) {
-    return [...new Uint8Array(buffer)].map(x => x.toString(16).padStart(2, "0")).join("");
-}
+function arrayBufferToHex(buffer) { return [...new Uint8Array(buffer)].map(x => x.toString(16).padStart(2, "0")).join(""); }
 
 async function handleUDPOutbound(ws, responseHeader, log) {
     let isHeaderSent = false;
@@ -1300,44 +968,26 @@ async function handleUDPOutbound(ws, responseHeader, log) {
             }
         },
     });
-
     transformStream.readable.pipeTo(new WritableStream({
         async write(chunk) {
-            const resp = await fetch("https://1.1.1.1/dns-query", {
-                method: "POST",
-                headers: {
-                    "content-type": "application/dns-message"
-                },
-                body: chunk
-            });
+            const resp = await fetch("https://1.1.1.1/dns-query", { method: "POST", headers: { "content-type": "application/dns-message" }, body: chunk });
             const dnsQueryResult = await resp.arrayBuffer();
             const udpSize = dnsQueryResult.byteLength;
             const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
             if (ws.readyState === WS_READY_STATE_OPEN) {
                 log(`DoH success, DNS length: ${udpSize}`);
                 if (isHeaderSent) ws.send(concat(udpSizeBuffer, new Uint8Array(dnsQueryResult)));
-                else {
-                    ws.send(concat(responseHeader, udpSizeBuffer, new Uint8Array(dnsQueryResult)));
-                    isHeaderSent = true;
-                }
+                else { ws.send(concat(responseHeader, udpSizeBuffer, new Uint8Array(dnsQueryResult))); isHeaderSent = true; }
             }
         },
     })).catch(e => log("DNS UDP error: " + e));
-
     const writer = transformStream.writable.getWriter();
-    return {
-        write(chunk) {
-            writer.write(chunk);
-        }
-    };
+    return { write(chunk) { writer.write(chunk); } };
 }
 
 function safeCloseWebSocket(ws) {
-    try {
-        if (ws.readyState === WS_READY_STATE_OPEN || ws.readyState === WS_READY_STATE_CLOSING) ws.close();
-    } catch (e) {
-        console.error("safeCloseWebSocket error", e);
-    }
+    try { if (ws.readyState === WS_READY_STATE_OPEN || ws.readyState === WS_READY_STATE_CLOSING) ws.close(); }
+    catch (e) { console.error("safeCloseWebSocket error", e); }
 }
 
 // ==================== HEALTH CHECK ENDPOINT ====================
@@ -1346,81 +996,46 @@ function healthHandler(req, res) {
         status: 'healthy',
         timestamp: new Date().toISOString(),
         service: 'vmess-ws-gateway',
-        uptime: (Date.now() - START_TIME) / 1000, // dalam detik
+        uptime: (Date.now() - START_TIME) / 1000,
         memory: process.memoryUsage(),
         version: process.version,
-        features: {
-            protocols: ['trojan', 'vmess', 'vless', 'shadowsocks'],
-            websocket: true,
-            tcp: true,
-            udp: true
-        },
-        network: {
-            outbound_allowed: true
-        }
+        features: { protocols: ['trojan', 'vmess', 'vless', 'shadowsocks'], websocket: true, tcp: true, udp: true },
+        network: { outbound_allowed: true }
     };
-
-    res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Max-Age': '86400',
-    });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Max-Age': '86400' });
     res.end(JSON.stringify(healthData, null, 2));
 }
 
 // ==================== SERVER SETUP ====================
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
-    // CORS preflight
     if (req.method === 'OPTIONS') {
-        res.writeHead(200, {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, OPTIONS',
-            'Access-Control-Allow-Headers': '*',
-            'Access-Control-Max-Age': '86400',
-        });
+        res.writeHead(200, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': '*', 'Access-Control-Max-Age': '86400' });
         res.end();
         return;
     }
 
-    // Health check endpoint
     if (url.pathname === '/health') {
         healthHandler(req, res);
         return;
     }
 
-    // Halaman dashboard
     if (url.pathname === '/' && req.headers['upgrade'] !== 'websocket') {
         res.writeHead(200, { 'Content-Type': 'text/html;charset=UTF-8' });
         res.end(getHtml(req.headers.host));
         return;
     }
 
-    // Fallback 404
     res.writeHead(404);
     res.end('Not Found');
 });
 
-// Graceful shutdown handler
 function gracefulShutdown() {
     console.log('Shutting down gracefully...');
-    wss.clients.forEach((client) => {
-        try {
-            if (client.readyState === WS_READY_STATE_OPEN || client.readyState === WS_READY_STATE_CLOSING) {
-                client.close();
-            }
-        } catch (e) {}
-    });
-    server.close(() => {
-        console.log('HTTP server closed');
-        process.exit(0);
-    });
-    setTimeout(() => {
-        console.error('Force exit after timeout');
-        process.exit(1);
-    }, 10000);
+    wss.clients.forEach((client) => { try { if (client.readyState === WS_READY_STATE_OPEN || client.readyState === WS_READY_STATE_CLOSING) client.close(); } catch (e) {} });
+    server.close(() => { console.log('HTTP server closed'); process.exit(0); });
+    setTimeout(() => { console.error('Force exit after timeout'); process.exit(1); }, 10000);
 }
 
 process.on('SIGTERM', gracefulShutdown);
@@ -1428,22 +1043,28 @@ process.on('SIGINT', gracefulShutdown);
 
 const wss = new WebSocketServer({ server });
 
-wss.on('connection', (ws, req) => {
+wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const pathPattern = new RegExp('^' + PROTOCOLS.OBFS_PATH + '(.+[:=-]\\d+)$', 'i');
-    const match = url.pathname.match(pathPattern);
     let pxip = '';
 
-    if (match) {
-        pxip = match[1].replace(/[=-]/, ':');
+    // Cek apakah ada proxy dari path routing baru (REGION, /ALL, /ID, /SG, dll)
+    const proxyFromPath = await getProxyFromPath(url.pathname);
+    if (proxyFromPath) {
+        pxip = proxyFromPath;
+        console.log(`Routed via path ${url.pathname} -> ${pxip}`);
     } else {
-        const oldMatch = url.pathname.match(/^\/(.+[:=-]\d+)$/);
-        if (oldMatch) {
-            pxip = oldMatch[1].replace(/[=-]/, ':');
+        // Fallback ke format lama (OBFS_PATH + ip=port)
+        const pathPattern = new RegExp('^' + PROTOCOLS.OBFS_PATH + '(.+[:=-]\\d+)$', 'i');
+        const match = url.pathname.match(pathPattern);
+        if (match) {
+            pxip = match[1].replace(/[=-]/, ':');
+        } else {
+            const oldMatch = url.pathname.match(/^\/(.+[:=-]\d+)$/);
+            if (oldMatch) pxip = oldMatch[1].replace(/[=-]/, ':');
         }
     }
 
-    if (pxip || url.pathname === PROTOCOLS.OBFS_PATH || url.pathname === '/') {
+    if (pxip || url.pathname === PROTOCOLS.OBFS_PATH || url.pathname === '/' || url.pathname.startsWith('/PROXYLIST/') || url.pathname.startsWith('/PUTAR') || url.pathname.startsWith('/ALL')) {
         websocketHandler(ws, req, pxip);
     } else {
         ws.close(1008, 'Invalid Path');
